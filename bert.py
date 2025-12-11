@@ -300,4 +300,198 @@ def evaluate_multi_view(model, dataloader, device):
 
         pred_5[mask_favor_strong]   = 4
         pred_5[mask_favor_weak]     = 3
-        pred_5[mask_again_]()_
+        pred_5[mask_against_strong] = 0
+        pred_5[mask_against_weak]   = 1
+
+        all_true5.extend(labels_5.cpu().tolist())
+        all_pred5.extend(pred_5.cpu().tolist())
+        all_topics.extend(list(topics))
+
+    if not all_true5:
+        print("[Eval] No samples in test dataloader.")
+        return
+
+    true5 = torch.tensor(all_true5, dtype=torch.long)
+    pred5 = torch.tensor(all_pred5, dtype=torch.long)
+
+    true3 = MAP_5_TO_3[true5]
+    pred3 = MAP_5_TO_3[pred5]
+
+    print("\n===== Overall metrics (whole test set) =====")
+
+    metrics_5 = compute_confusion_metrics(true5, pred5, NUM_LABELS_5)
+    print("[5-class] overall: "
+          f"acc={metrics_5['accuracy']:.4f}, "
+          f"P_macro={metrics_5['macro_precision']:.4f}, "
+          f"R_macro={metrics_5['macro_recall']:.4f}, "
+          f"F1_macro={metrics_5['macro_f1']:.4f}")
+
+    metrics_3 = compute_confusion_metrics(true3, pred3, NUM_LABELS_3)
+    print("[3-class] overall (oppose/neutral/support): "
+          f"acc={metrics_3['accuracy']:.4f}, "
+          f"P_macro={metrics_3['macro_precision']:.4f}, "
+          f"R_macro={metrics_3['macro_recall']:.4f}, "
+          f"F1_macro={metrics_3['macro_f1']:.4f}")
+
+    mask_non_neutral = (true3 != 1)
+    true3_eff = true3[mask_non_neutral]
+    pred3_eff = pred3[mask_non_neutral]
+
+    if true3_eff.numel() > 0:
+        true2 = torch.where(true3_eff == 0,
+                            torch.zeros_like(true3_eff),
+                            torch.ones_like(true3_eff))
+        pred2 = torch.empty_like(true2)
+        for i in range(true2.numel()):
+            if pred3_eff[i] == 0:
+                pred2[i] = 0
+            elif pred3_eff[i] == 2:
+                pred2[i] = 1
+            else:
+                pred2[i] = 1 - true2[i]
+
+        metrics_2 = compute_confusion_metrics(true2, pred2, num_labels=2)
+        print("[2-class] overall (support vs oppose, GT non-neutral, neutral pred = wrong): "
+              f"acc={metrics_2['accuracy']:.4f}, "
+              f"P_macro={metrics_2['macro_precision']:.4f}, "
+              f"R_macro={metrics_2['macro_recall']:.4f}, "
+              f"F1_macro={metrics_2['macro_f1']:.4f}")
+    else:
+        print("[2-class] overall: no non-neutral GT samples; metrics not computed.")
+        metrics_2 = None
+
+    print("\n===== Per-topic metrics =====")
+    topic2idx: Dict[str, List[int]] = {}
+    for i, t in enumerate(all_topics):
+        topic2idx.setdefault(t, []).append(i)
+
+    topic_metrics_5 = []
+    topic_metrics_3 = []
+    topic_metrics_2 = []
+
+    for topic, indices in sorted(topic2idx.items(), key=lambda x: x[0]):
+        idx_tensor = torch.tensor(indices, dtype=torch.long)
+
+        t5 = true5[idx_tensor]
+        p5 = pred5[idx_tensor]
+        t3 = true3[idx_tensor]
+        p3 = pred3[idx_tensor]
+
+        m5_t = compute_confusion_metrics(t5, p5, NUM_LABELS_5)
+        m3_t = compute_confusion_metrics(t3, p3, NUM_LABELS_3)
+
+        mask_non_neutral_t = (t3 != 1)
+        t3_eff_t = t3[mask_non_neutral_t]
+        p3_eff_t = p3[mask_non_neutral_t]
+
+        if t3_eff_t.numel() > 0:
+            true2_t = torch.where(t3_eff_t == 0,
+                                  torch.zeros_like(t3_eff_t),
+                                  torch.ones_like(t3_eff_t))
+            pred2_t = torch.empty_like(true2_t)
+            for i in range(true2_t.numel()):
+                if p3_eff_t[i] == 0:
+                    pred2_t[i] = 0
+                elif p3_eff_t[i] == 2:
+                    pred2_t[i] = 1
+                else:
+                    pred2_t[i] = 1 - true2_t[i]
+            m2_t = compute_confusion_metrics(true2_t, pred2_t, num_labels=2)
+            topic_metrics_2.append(m2_t)
+        else:
+            m2_t = None
+
+        topic_metrics_5.append(m5_t)
+        topic_metrics_3.append(m3_t)
+
+        print(f"\n--- Topic: {topic} ---")
+        print(f"[5-class] acc={m5_t['accuracy']:.4f}, "
+              f"P_macro={m5_t['macro_precision']:.4f}, "
+              f"R_macro={m5_t['macro_recall']:.4f}, "
+              f"F1_macro={m5_t['macro_f1']:.4f}")
+        print(f"[3-class] acc={m3_t['accuracy']:.4f}, "
+              f"P_macro={m3_t['macro_precision']:.4f}, "
+              f"R_macro={m3_t['macro_recall']:.4f}, "
+              f"F1_macro={m3_t['macro_f1']:.4f}")
+        if m2_t is not None:
+            print(f"[2-class] acc={m2_t['accuracy']:.4f}, "
+                  f"P_macro={m2_t['macro_precision']:.4f}, "
+                  f"R_macro={m2_t['macro_recall']:.4f}, "
+                  f"F1_macro={m2_t['macro_f1']:.4f}")
+        else:
+            print("[2-class] (no non-neutral GT samples for this topic)")
+
+    avg_5 = average_topic_metrics(topic_metrics_5)
+    avg_3 = average_topic_metrics(topic_metrics_3)
+    avg_2 = average_topic_metrics(topic_metrics_2)
+
+    print("\n===== Topic-macro-averaged metrics =====")
+    print("[5-class] topic-avg: "
+          f"acc={avg_5['accuracy']:.4f}, "
+          f"P_macro={avg_5['macro_precision']:.4f}, "
+          f"R_macro={avg_5['macro_recall']:.4f}, "
+          f"F1_macro={avg_5['macro_f1']:.4f}")
+    print("[3-class] topic-avg: "
+          f"acc={avg_3['accuracy']:.4f}, "
+          f"P_macro={avg_3['macro_precision']:.4f}, "
+          f"R_macro={avg_3['macro_recall']:.4f}, "
+          f"F1_macro={avg_3['macro_f1']:.4f}")
+    print("[2-class] topic-avg (only topics with non-neutral GT): "
+          f"acc={avg_2['accuracy']:.4f}, "
+          f"P_macro={avg_2['macro_precision']:.4f}, "
+          f"R_macro={avg_2['macro_recall']:.4f}, "
+          f"F1_macro={avg_2['macro_f1']:.4f}")
+
+
+def main():
+    set_seed(SEED)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Info] device = {device}")
+
+    tokenizer = AutoTokenizer.from_pretrained(ENCODER_MODEL)
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    train_dataset = StanceParquetDataset(TRAIN_PATH, tokenizer, max_length=MAX_LENGTH)
+    test_dataset  = StanceParquetDataset(TEST_PATH,  tokenizer, max_length=MAX_LENGTH)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    test_loader  = DataLoader(test_dataset,  batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+
+    model = HierStanceRoberta(ENCODER_MODEL)
+    model.to(device)
+
+    print(f"[Info] Finetune encoder (lr={LR_ENCODER}) and three heads (lr={LR_HEAD}).")
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": model.encoder.parameters(),        "lr": LR_ENCODER},
+            {"params": model.head_polarity.parameters(),  "lr": LR_HEAD},
+            {"params": model.head_direction.parameters(), "lr": LR_HEAD},
+            {"params": model.head_strength.parameters(),  "lr": LR_HEAD},
+        ],
+        weight_decay=WEIGHT_DECAY,
+    )
+
+    num_training_steps = NUM_EPOCHS * len(train_loader)
+    num_warmup_steps = int(0.1 * num_training_steps)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+    )
+
+    for epoch in range(1, NUM_EPOCHS + 1):
+        print(f"\n===== Epoch {epoch}/{NUM_EPOCHS} =====")
+        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, device)
+        print(f"[Train] loss={train_loss:.4f}")
+
+    print("\n===== Final evaluation on TEST (5/3/2-class, per-topic) =====")
+    evaluate_multi_view(model, test_loader, device)
+
+    torch.save(model.state_dict(), SAVE_PATH)
+    print(f"[Info] Saved model weights to {SAVE_PATH}")
+
+
+if __name__ == "__main__":
+    main()
